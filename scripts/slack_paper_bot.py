@@ -308,10 +308,15 @@ def main() -> None:
     print(f"キーワード: {keywords}")
 
     # ── キーワード検索 ──
+    # 月曜日は土日分をカバーするため3日、それ以外は2日
+    import datetime as dt
+    days = 3 if dt.datetime.utcnow().weekday() == 0 else 2
+    days = 120  # 初回登録用：終わったら削除してください
+
     pmid_to_keywords: dict[str, list[str]] = {}
     for keyword in keywords:
         print(f"検索中: {keyword}")
-        pmids = search_pubmed(keyword)
+        pmids = search_pubmed(keyword, days=days)
         for pmid in pmids:
             pmid_to_keywords.setdefault(pmid, []).append(keyword)
         time.sleep(0.4)
@@ -325,7 +330,7 @@ def main() -> None:
         doi = wp.get("doi", "")
         label = wp.get("title", doi)
         print(f"引用追跡中: {label}")
-        citing = fetch_citing_papers(doi)
+        citing = fetch_citing_papers(doi, days=120)
         for paper in citing:
             pmid = paper["pmid"]
             # PubMed IDがある場合は重複チェック、ない場合はDOIで管理
