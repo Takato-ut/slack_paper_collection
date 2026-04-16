@@ -2,6 +2,7 @@ import os
 import json
 import requests
 import time
+import xml.etree.ElementTree as ET
 
 SLACK_WEBHOOK_URL = os.environ["SLACK_WEBHOOK_URL"]
 NOTION_API_KEY = os.environ["NOTION_API_KEY"]
@@ -56,7 +57,6 @@ def save_notion_db_id(db_id: str) -> None:
 
 
 def create_notion_database() -> str:
-    """親ページ配下に論文収集データベースを新規作成し、IDを返す"""
     payload = {
         "parent": {"type": "page_id", "page_id": NOTION_PARENT_PAGE_ID},
         "title": [{"type": "text", "text": {"content": "論文自動収集"}}],
@@ -108,74 +108,117 @@ def search_pubmed(query: str, days: int = 2, retmax: int = 20) -> list[str]:
     return r.json()["esearchresult"]["idlist"]
 
 
-def fetch_details(pmids: list[str]) -> list[dict]:
+def fetch_papers(pmids: list[str]) -> list[dict]:
+    """efetch XML形式でメタデータ＋Abstractを一括取得する"""
     if not pmids:
         return []
-    url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
-    params = {"db": "pubmed", "id": ",".join(pmids), "retmode": "json"}
-    r = requests.get(url, params=params, timeout=15)
+
+    url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+    params = {"db": "pubmed", "id": ",".join(pmids), "retmode": "xml"}
+    r = requests.get(url, params=params, timeout=30)
     r.raise_for_status()
-    result = r.json()["result"]
 
+    root = ET.fromstring(r.text)
     papers = []
-    for pmid in pmids:
-        item = result.get(pmid)
-        if not item or item.get("error"):
-            continue
 
-        raw_authors = item.get("authors", [])
-        author_names = [a["name"] for a in raw_authors[:3]]
-        authors = ", ".join(author_names)
-        if len(raw_authors) > 3:
+    for article in root.findall(".//PubmedArticle"):
+        # PMID
+        pmid = article.findtext(".//PMID", "")
+
+        # タイトル
+        title_el = article.find(".//ArticleTitle")
+        title = "".join(title_el.itertext()) if title_el is not None else "(タイトル不明)"
+
+        # 著者（最大3名 + et al.）
+        authors_list = []
+        for author in article.findall(".//Author"):
+            last = author.findtext("LastName", "")
+            fore = author.findtext("ForeName", "")
+            if last:
+                authors_list.append(f"{last} {fore}".strip())
+        authors = ", ".join(authors_list[:3])
+        if len(authors_list) > 3:
             authors += " et al."
 
-        doi_raw = item.get("elocationid", "")
-        doi = doi_raw.replace("doi: ", "").strip() if doi_raw.startswith("doi:") else ""
+        # DOI
+        doi = ""
+        for id_el in article.findall(".//ArticleId"):
+            if id_el.get("IdType") == "doi":
+                doi = id_el.text or ""
+
+        # Abstract（構造化Abstract対応：BACKGROUND: 等のラベルも含める）
+        abstract_parts = article.findall(".//AbstractText")
+        abstract = " ".join(
+            ((el.get("Label", "") + ": ") if el.get("Label") else "") + (el.text or "")
+            for el in abstract_parts
+        ).strip()
+        if not abstract:
+            abstract = "(Abstract取得できませんでした)"
 
         papers.append({
             "pmid": pmid,
-            "title": item.get("title", "(タイトル不明)"),
+            "title": title,
             "authors": authors or "(著者不明)",
             "doi": doi,
+            "abstract": abstract,
         })
 
     return papers
 
 
-def fetch_abstract(pmid: str) -> str:
-    """efetch APIでAbstractを取得する"""
-    url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
-    params = {"db": "pubmed", "id": pmid, "retmode": "text", "rettype": "abstract"}
-    r = requests.get(url, params=params, timeout=15)
-    r.raise_for_status()
-
-    text = r.text
-    marker = "Abstract\n"
-    idx = text.find(marker)
-    if idx != -1:
-        abstract = text[idx + len(marker):].strip()
-        for stop in ["\nCopyright", "\n©", "\nPMID:"]:
-            stop_idx = abstract.find(stop)
-            if stop_idx != -1:
-                abstract = abstract[:stop_idx].strip()
-        return abstract
-
-    return "(Abstract取得できませんでした)"
-
-
 # ── 通知・登録 ──────────────────────────────────────────────
 
 def post_to_slack(paper: dict) -> None:
+    """Block KitでAbstract付きカードとして通知する"""
     pubmed_url = f"https://pubmed.ncbi.nlm.nih.gov/{paper['pmid']}/"
-    doi_line = f"\n🔗 DOI: `{paper['doi']}`" if paper["doi"] else ""
+    doi_text = f"DOI: {paper['doi']}  |  " if paper["doi"] else ""
 
-    text = (
-        f"*{paper['title']}*\n"
-        f"👤 {paper['authors']}"
-        f"{doi_line}\n"
-        f"🔬 <{pubmed_url}|PubMedで開く>"
+    # Abstractは300文字で切る
+    abstract = paper["abstract"]
+    if len(abstract) > 300:
+        abstract = abstract[:300] + "…"
+
+    blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*<{pubmed_url}|{paper['title']}>*",
+            },
+        },
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"👤 {paper['authors']}",
+                }
+            ],
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": abstract,
+            },
+        },
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"{doi_text}<{pubmed_url}|PubMedで開く>",
+                }
+            ],
+        },
+        {"type": "divider"},
+    ]
+
+    r = requests.post(
+        SLACK_WEBHOOK_URL,
+        json={"blocks": blocks},
+        timeout=10,
     )
-    r = requests.post(SLACK_WEBHOOK_URL, json={"text": text}, timeout=10)
     r.raise_for_status()
 
 
@@ -183,7 +226,6 @@ def add_to_notion(db_id: str, paper: dict, keywords: list[str]) -> None:
     pubmed_url = f"https://pubmed.ncbi.nlm.nih.gov/{paper['pmid']}/"
     doi_url = f"https://doi.org/{paper['doi']}" if paper["doi"] else None
 
-    # Abstract は2000文字を上限とする（Notion rich_text の制限対策）
     abstract = paper.get("abstract", "")[:2000]
 
     payload = {
@@ -220,7 +262,6 @@ def main() -> None:
     posted = load_posted()
     notion_db_id = get_or_create_notion_db()
 
-    # キーワードごとに検索し、PMIDとヒットキーワードを紐付け
     pmid_to_keywords: dict[str, list[str]] = {}
     for keyword in KEYWORDS:
         print(f"検索中: {keyword}")
@@ -236,7 +277,8 @@ def main() -> None:
         print("通知対象の新着論文はありませんでした。")
         return
 
-    papers = fetch_details(new_pmids)
+    # メタデータ＋Abstractを一括取得
+    papers = fetch_papers(new_pmids)
 
     # ヘッダー通知
     requests.post(
@@ -247,15 +289,9 @@ def main() -> None:
     time.sleep(0.5)
 
     for paper in papers:
-        # Abstract取得
-        paper["abstract"] = fetch_abstract(paper["pmid"])
-        time.sleep(0.4)
-
-        # Slack通知
         post_to_slack(paper)
         time.sleep(0.5)
 
-        # Notion登録
         keywords = pmid_to_keywords.get(paper["pmid"], [])
         add_to_notion(notion_db_id, paper, keywords)
         time.sleep(0.5)
