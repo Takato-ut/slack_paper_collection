@@ -339,7 +339,6 @@ def main() -> None:
     # 月曜日は土日分をカバーするため3日、それ以外は2日
     import datetime as dt
     days = 3 if dt.datetime.utcnow().weekday() == 0 else 2
-    days = 120  # 初回登録用：終わったら削除してください
 
     pmid_to_keywords: dict[str, list[str]] = {}
     for keyword in keywords:
