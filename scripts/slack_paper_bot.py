@@ -4,20 +4,28 @@ import requests
 import time
 import xml.etree.ElementTree as ET
 
-SLACK_WEBHOOK_URL = os.environ["SLACK_WEBHOOK_URL"]
+SLACK_BOT_TOKEN = os.environ["SLACK_BOT_TOKEN"]
+SLACK_CHANNEL_ID = os.environ["SLACK_CHANNEL_ID"]
+
+SLACK_POST_URL = "https://slack.com/api/chat.postMessage"
+SLACK_HEADERS = {
+    "Authorization": f"Bearer {SLACK_BOT_TOKEN}",
+    "Content-Type": "application/json",
+}
 NOTION_API_KEY = os.environ["NOTION_API_KEY"]
 NOTION_PARENT_PAGE_ID = os.environ["NOTION_PARENT_PAGE_ID"]
 
 POSTED_FILE = "data/posted_papers.json"
 NOTION_DB_ID_FILE = "data/notion_database_id.txt"
 
-KEYWORDS = [
-    "OsHRZ",
-    "phytosiderophore",
-    "iron homeostasis rice",
-    "zinc transporter rice",
-    "metal homeostasis rice",
-]
+KEYWORDS_FILE = "data/keywords.json"
+
+
+def load_keywords() -> list[str]:
+    if not os.path.exists(KEYWORDS_FILE):
+        raise FileNotFoundError(f"{KEYWORDS_FILE} が見つかりません。リポジトリに追加してください。")
+    with open(KEYWORDS_FILE) as f:
+        return json.load(f)
 
 NOTION_HEADERS = {
     "Authorization": f"Bearer {NOTION_API_KEY}",
@@ -63,7 +71,6 @@ def create_notion_database() -> str:
         "properties": {
             "タイトル": {"title": {}},
             "著者": {"rich_text": {}},
-            "Abstract": {"rich_text": {}},
             "検索キーワード": {"multi_select": {}},
             "DOI": {"url": {}},
             "PubMed": {"url": {}},
@@ -170,16 +177,12 @@ def fetch_papers(pmids: list[str]) -> list[dict]:
 # ── 通知・登録 ──────────────────────────────────────────────
 
 def post_to_slack(paper: dict) -> None:
-    """Block KitでAbstract付きカードとして通知する"""
+    """メインメッセージを投稿し、Abstractをスレッドに投稿する"""
     pubmed_url = f"https://pubmed.ncbi.nlm.nih.gov/{paper['pmid']}/"
     doi_text = f"DOI: {paper['doi']}  |  " if paper["doi"] else ""
 
-    # Abstractは300文字で切る
-    abstract = paper["abstract"]
-    if len(abstract) > 300:
-        abstract = abstract[:300] + "…"
-
-    blocks = [
+    # ── メインメッセージ ──
+    main_blocks = [
         {
             "type": "section",
             "text": {
@@ -190,50 +193,52 @@ def post_to_slack(paper: dict) -> None:
         {
             "type": "context",
             "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": f"👤 {paper['authors']}",
-                }
+                {"type": "mrkdwn", "text": f"👤 {paper['authors']}"},
             ],
         },
-    ]
-
-    # Abstractがある場合のみブロックを追加
-    if abstract and abstract != "(Abstract取得できませんでした)":
-        blocks.append({
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": abstract,
-            },
-        })
-
-    blocks += [
         {
             "type": "context",
             "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": f"{doi_text}<{pubmed_url}|PubMedで開く>",
-                }
+                {"type": "mrkdwn", "text": f"{doi_text}<{pubmed_url}|PubMedで開く>"},
             ],
         },
         {"type": "divider"},
     ]
 
     r = requests.post(
-        SLACK_WEBHOOK_URL,
-        json={"blocks": blocks},
+        SLACK_POST_URL,
+        headers=SLACK_HEADERS,
+        json={"channel": SLACK_CHANNEL_ID, "blocks": main_blocks},
         timeout=10,
     )
     r.raise_for_status()
+    data = r.json()
+    if not data.get("ok"):
+        raise RuntimeError(f"Slack API エラー: {data.get('error')}")
+
+    # ── スレッドにAbstractを投稿 ──
+    abstract = paper.get("abstract", "")
+    if abstract and abstract != "(Abstract取得できませんでした)":
+        thread_ts = data["ts"]
+        requests.post(
+            SLACK_POST_URL,
+            headers=SLACK_HEADERS,
+            json={
+                "channel": SLACK_CHANNEL_ID,
+                "thread_ts": thread_ts,
+                "text": f"*Abstract*\n{abstract}",
+            },
+            timeout=10,
+        ).raise_for_status()
 
 
 def add_to_notion(db_id: str, paper: dict, keywords: list[str]) -> None:
     pubmed_url = f"https://pubmed.ncbi.nlm.nih.gov/{paper['pmid']}/"
     doi_url = f"https://doi.org/{paper['doi']}" if paper["doi"] else None
 
-    abstract = paper.get("abstract", "")[:2000]
+    abstract = paper.get("abstract", "")
+    # Notion paragraph ブロックは2000文字上限
+    abstract_chunks = [abstract[i:i+2000] for i in range(0, len(abstract), 2000)] if abstract else []
 
     payload = {
         "parent": {"database_id": db_id},
@@ -244,15 +249,31 @@ def add_to_notion(db_id: str, paper: dict, keywords: list[str]) -> None:
             "著者": {
                 "rich_text": [{"text": {"content": paper["authors"]}}]
             },
-            "Abstract": {
-                "rich_text": [{"text": {"content": abstract}}]
-            },
             "検索キーワード": {
                 "multi_select": [{"name": kw} for kw in keywords]
             },
             "DOI": {"url": doi_url},
             "PubMed": {"url": pubmed_url},
         },
+        "children": [
+            {
+                "object": "block",
+                "type": "heading_2",
+                "heading_2": {
+                    "rich_text": [{"type": "text", "text": {"content": "Abstract"}}]
+                },
+            },
+            *[
+                {
+                    "object": "block",
+                    "type": "paragraph",
+                    "paragraph": {
+                        "rich_text": [{"type": "text", "text": {"content": chunk}}]
+                    },
+                }
+                for chunk in abstract_chunks
+            ],
+        ],
     }
     r = requests.post(
         "https://api.notion.com/v1/pages",
@@ -268,9 +289,11 @@ def add_to_notion(db_id: str, paper: dict, keywords: list[str]) -> None:
 def main() -> None:
     posted = load_posted()
     notion_db_id = get_or_create_notion_db()
+    keywords = load_keywords()
+    print(f"キーワード: {keywords}")
 
     pmid_to_keywords: dict[str, list[str]] = {}
-    for keyword in KEYWORDS:
+    for keyword in keywords:
         print(f"検索中: {keyword}")
         pmids = search_pubmed(keyword)
         for pmid in pmids:
@@ -289,10 +312,11 @@ def main() -> None:
 
     # ヘッダー通知
     requests.post(
-        SLACK_WEBHOOK_URL,
-        json={"text": f"📚 *論文自動収集Bot* — 新着 {len(papers)} 件"},
+        SLACK_POST_URL,
+        headers=SLACK_HEADERS,
+        json={"channel": SLACK_CHANNEL_ID, "text": f"📚 *論文自動収集Bot* — 新着 {len(papers)} 件"},
         timeout=10,
-    )
+    ).raise_for_status()
     time.sleep(0.5)
 
     for paper in papers:
