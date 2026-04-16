@@ -81,6 +81,7 @@ def create_notion_database() -> str:
         "properties": {
             "Title": {"title": {}},
             "Authors": {"rich_text": {}},
+            "Journal": {"rich_text": {}},
             "Keywords": {"multi_select": {}},
             "Published": {"date": {}},
             "DOI": {"url": {}},
@@ -190,10 +191,14 @@ def fetch_papers(pmids: list[str]) -> list[dict]:
             day   = day.zfill(2) if day.isdigit() else "01"
             pub_date = f"{year}-{month}-{day}"
 
+        # ジャーナル名
+        journal = article.findtext(".//Journal/Title", "") or article.findtext(".//MedlineTA", "")
+
         papers.append({
             "pmid": pmid,
             "title": title,
             "authors": authors or "(著者不明)",
+            "journal": journal,
             "doi": doi,
             "abstract": abstract,
             "pub_date": pub_date,
@@ -281,6 +286,9 @@ def add_to_notion(db_id: str, paper: dict, keywords: list[str]) -> None:
             },
             "Authors": {
                 "rich_text": [{"text": {"content": paper["authors"]}}]
+            },
+            "Journal": {
+                "rich_text": [{"text": {"content": paper.get("journal", "")}}]
             },
             "Keywords": {
                 "multi_select": [{"name": kw} for kw in keywords]
