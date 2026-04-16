@@ -19,12 +19,22 @@ POSTED_FILE = "data/posted_papers.json"
 NOTION_DB_ID_FILE = "data/notion_database_id.txt"
 
 KEYWORDS_FILE = "data/keywords.json"
+WATCH_PAPERS_FILE = "data/watch_papers.json"
+
+SEMANTIC_SCHOLAR_API = "https://api.semanticscholar.org/graph/v1"
 
 
 def load_keywords() -> list[str]:
     if not os.path.exists(KEYWORDS_FILE):
         raise FileNotFoundError(f"{KEYWORDS_FILE} が見つかりません。リポジトリに追加してください。")
     with open(KEYWORDS_FILE) as f:
+        return json.load(f)
+
+
+def load_watch_papers() -> list[dict]:
+    if not os.path.exists(WATCH_PAPERS_FILE):
+        return []
+    with open(WATCH_PAPERS_FILE) as f:
         return json.load(f)
 
 NOTION_HEADERS = {
@@ -176,10 +186,14 @@ def fetch_papers(pmids: list[str]) -> list[dict]:
 
 # ── 通知・登録 ──────────────────────────────────────────────
 
-def post_to_slack(paper: dict) -> None:
+def post_to_slack(paper: dict, cite_source: str = "") -> None:
     """メインメッセージを投稿し、Abstractをスレッドに投稿する"""
-    pubmed_url = f"https://pubmed.ncbi.nlm.nih.gov/{paper['pmid']}/"
+    pubmed_url = f"https://pubmed.ncbi.nlm.nih.gov/{paper['pmid']}/" if paper["pmid"] else ""
     doi_text = f"DOI: {paper['doi']}  |  " if paper["doi"] else ""
+    link_text = f"<{pubmed_url}|PubMedで開く>" if pubmed_url else (f"https://doi.org/{paper['doi']}" if paper["doi"] else "")
+
+    title_line = f"*<{pubmed_url}|{paper['title']}>*" if pubmed_url else f"*{paper['title']}*"
+    cite_line = f"\n📎 引用元: _{cite_source}_" if cite_source else ""
 
     # ── メインメッセージ ──
     main_blocks = [
@@ -187,7 +201,7 @@ def post_to_slack(paper: dict) -> None:
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"*<{pubmed_url}|{paper['title']}>*",
+                "text": f"{title_line}{cite_line}",
             },
         },
         {
@@ -199,7 +213,7 @@ def post_to_slack(paper: dict) -> None:
         {
             "type": "context",
             "elements": [
-                {"type": "mrkdwn", "text": f"{doi_text}<{pubmed_url}|PubMedで開く>"},
+                {"type": "mrkdwn", "text": f"{doi_text}{link_text}"},
             ],
         },
         {"type": "divider"},
@@ -290,8 +304,10 @@ def main() -> None:
     posted = load_posted()
     notion_db_id = get_or_create_notion_db()
     keywords = load_keywords()
+    watch_papers = load_watch_papers()
     print(f"キーワード: {keywords}")
 
+    # ── キーワード検索 ──
     pmid_to_keywords: dict[str, list[str]] = {}
     for keyword in keywords:
         print(f"検索中: {keyword}")
@@ -301,37 +317,64 @@ def main() -> None:
         time.sleep(0.4)
 
     new_pmids = [p for p in pmid_to_keywords if p not in posted]
-    print(f"新着: {len(new_pmids)} 件")
+    print(f"キーワード新着: {len(new_pmids)} 件")
 
-    if not new_pmids:
+    # ── 引用追跡 ──
+    citation_papers: list[dict] = []
+    for wp in watch_papers:
+        doi = wp.get("doi", "")
+        label = wp.get("title", doi)
+        print(f"引用追跡中: {label}")
+        citing = fetch_citing_papers(doi)
+        for paper in citing:
+            pmid = paper["pmid"]
+            # PubMed IDがある場合は重複チェック、ない場合はDOIで管理
+            key = pmid if pmid else f"doi:{paper['doi']}"
+            if key not in posted:
+                paper["_cite_source"] = label
+                citation_papers.append(paper)
+                posted.add(key)
+        time.sleep(0.5)
+
+    print(f"引用新着: {len(citation_papers)} 件")
+
+    all_new = bool(new_pmids) or bool(citation_papers)
+    if not all_new:
         print("通知対象の新着論文はありませんでした。")
         return
 
-    # メタデータ＋Abstractを一括取得
-    papers = fetch_papers(new_pmids)
-
-    # ヘッダー通知
+    total = len(new_pmids) + len(citation_papers)
     requests.post(
         SLACK_POST_URL,
         headers=SLACK_HEADERS,
-        json={"channel": SLACK_CHANNEL_ID, "text": f"📚 *論文自動収集Bot* — 新着 {len(papers)} 件"},
+        json={"channel": SLACK_CHANNEL_ID, "text": f"📚 *論文自動収集Bot* — 新着 {total} 件"},
         timeout=10,
     ).raise_for_status()
     time.sleep(0.5)
 
-    for paper in papers:
-        post_to_slack(paper)
-        time.sleep(0.5)
+    # キーワードヒット論文
+    if new_pmids:
+        papers = fetch_papers(new_pmids)
+        for paper in papers:
+            post_to_slack(paper)
+            time.sleep(0.5)
+            kws = pmid_to_keywords.get(paper["pmid"], [])
+            add_to_notion(notion_db_id, paper, kws)
+            time.sleep(0.5)
+            posted.add(paper["pmid"])
+            print(f"  完了: {paper['pmid']} / {paper['title'][:50]}")
 
-        keywords = pmid_to_keywords.get(paper["pmid"], [])
-        add_to_notion(notion_db_id, paper, keywords)
+    # 引用論文
+    for paper in citation_papers:
+        cite_source = paper.pop("_cite_source", "")
+        post_to_slack(paper, cite_source=cite_source)
         time.sleep(0.5)
-
-        posted.add(paper["pmid"])
-        print(f"  完了: {paper['pmid']} / {paper['title'][:50]}")
+        add_to_notion(notion_db_id, paper, [f"引用: {cite_source}"])
+        time.sleep(0.5)
+        print(f"  完了(引用): {paper['title'][:50]}")
 
     save_posted(posted)
-    print(f"{len(papers)} 件を通知・登録し、記録を更新しました。")
+    print(f"{total} 件を通知・登録し、記録を更新しました。")
 
 
 if __name__ == "__main__":
