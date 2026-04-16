@@ -1,0 +1,40 @@
+name: Slack Paper Bot
+
+on:
+  schedule:
+    # 平日（月〜金）10:00 JST（= UTC 01:00）
+    - cron: '0 1 * * 1-5'
+  workflow_dispatch:  # 手動実行も可能
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # posted_papers.json / notion_database_id.txt のコミットに必要
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run paper bot
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
+        run: python scripts/slack_paper_bot.py
+
+      - name: Commit updated data files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/posted_papers.json data/notion_database_id.txt
+          git diff --staged --quiet || git commit -m "chore: update posted papers [skip ci]"
+          git push
