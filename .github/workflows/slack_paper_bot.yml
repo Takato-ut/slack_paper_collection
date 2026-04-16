@@ -4,13 +4,15 @@ on:
   schedule:
     # 平日（月〜金）10:00 JST（= UTC 01:00）
     - cron: '0 1 * * 1-5'
-  workflow_dispatch:  # 手動実行も可能
+  workflow_dispatch:
 
 jobs:
   notify:
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     permissions:
-      contents: write  # posted_papers.json / notion_database_id.txt のコミットに必要
+      contents: write
 
     steps:
       - name: Checkout
