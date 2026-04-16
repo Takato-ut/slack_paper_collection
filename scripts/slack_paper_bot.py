@@ -147,9 +147,10 @@ def fetch_papers(pmids: list[str]) -> list[dict]:
                 doi = id_el.text or ""
 
         # Abstract（構造化Abstract対応：BACKGROUND: 等のラベルも含める）
+        # itertext() でサブ要素（<sup>, <i> 等）内のテキストも結合する
         abstract_parts = article.findall(".//AbstractText")
         abstract = " ".join(
-            ((el.get("Label", "") + ": ") if el.get("Label") else "") + (el.text or "")
+            ((el.get("Label", "") + ": ") if el.get("Label") else "") + "".join(el.itertext())
             for el in abstract_parts
         ).strip()
         if not abstract:
@@ -195,13 +196,19 @@ def post_to_slack(paper: dict) -> None:
                 }
             ],
         },
-        {
+    ]
+
+    # Abstractがある場合のみブロックを追加
+    if abstract and abstract != "(Abstract取得できませんでした)":
+        blocks.append({
             "type": "section",
             "text": {
                 "type": "mrkdwn",
                 "text": abstract,
             },
-        },
+        })
+
+    blocks += [
         {
             "type": "context",
             "elements": [
