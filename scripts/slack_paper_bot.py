@@ -79,9 +79,10 @@ def create_notion_database() -> str:
         "parent": {"type": "page_id", "page_id": NOTION_PARENT_PAGE_ID},
         "title": [{"type": "text", "text": {"content": "論文自動収集"}}],
         "properties": {
-            "タイトル": {"title": {}},
-            "著者": {"rich_text": {}},
-            "検索キーワード": {"multi_select": {}},
+            "Title": {"title": {}},
+            "Authors": {"rich_text": {}},
+            "Keywords": {"multi_select": {}},
+            "Published": {"date": {}},
             "DOI": {"url": {}},
             "PubMed": {"url": {}},
         },
@@ -173,12 +174,29 @@ def fetch_papers(pmids: list[str]) -> list[dict]:
         if not abstract:
             abstract = "(Abstract取得できませんでした)"
 
+        # 出版日（YYYY-MM-DD形式に統一、取得できない場合は空文字）
+        pub_date = ""
+        year  = article.findtext(".//PubDate/Year", "")
+        month = article.findtext(".//PubDate/Month", "")
+        day   = article.findtext(".//PubDate/Day", "")
+        if year:
+            # 月が英語略称の場合（Jan, Feb...）を数字に変換
+            month_map = {
+                "Jan": "01", "Feb": "02", "Mar": "03", "Apr": "04",
+                "May": "05", "Jun": "06", "Jul": "07", "Aug": "08",
+                "Sep": "09", "Oct": "10", "Nov": "11", "Dec": "12",
+            }
+            month = month_map.get(month, month.zfill(2) if month.isdigit() else "01")
+            day   = day.zfill(2) if day.isdigit() else "01"
+            pub_date = f"{year}-{month}-{day}"
+
         papers.append({
             "pmid": pmid,
             "title": title,
             "authors": authors or "(著者不明)",
             "doi": doi,
             "abstract": abstract,
+            "pub_date": pub_date,
         })
 
     return papers
@@ -247,25 +265,27 @@ def post_to_slack(paper: dict, cite_source: str = "") -> None:
 
 
 def add_to_notion(db_id: str, paper: dict, keywords: list[str]) -> None:
-    pubmed_url = f"https://pubmed.ncbi.nlm.nih.gov/{paper['pmid']}/"
+    pubmed_url = f"https://pubmed.ncbi.nlm.nih.gov/{paper['pmid']}/" if paper["pmid"] else None
     doi_url = f"https://doi.org/{paper['doi']}" if paper["doi"] else None
 
     abstract = paper.get("abstract", "")
-    # Notion paragraph ブロックは2000文字上限
     abstract_chunks = [abstract[i:i+2000] for i in range(0, len(abstract), 2000)] if abstract else []
+
+    pub_date = paper.get("pub_date", "")
 
     payload = {
         "parent": {"database_id": db_id},
         "properties": {
-            "タイトル": {
+            "Title": {
                 "title": [{"text": {"content": paper["title"]}}]
             },
-            "著者": {
+            "Authors": {
                 "rich_text": [{"text": {"content": paper["authors"]}}]
             },
-            "検索キーワード": {
+            "Keywords": {
                 "multi_select": [{"name": kw} for kw in keywords]
             },
+            "Published": {"date": {"start": pub_date}} if pub_date else {"date": None},
             "DOI": {"url": doi_url},
             "PubMed": {"url": pubmed_url},
         },
