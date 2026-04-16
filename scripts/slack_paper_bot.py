@@ -149,6 +149,14 @@ def fetch_papers(pmids: list[str]) -> list[dict]:
         # Abstract（構造化Abstract対応：BACKGROUND: 等のラベルも含める）
         # itertext() でサブ要素（<sup>, <i> 等）内のテキストも結合する
         abstract_parts = article.findall(".//AbstractText")
+
+        # デバッグ: AbstractTextの検索結果を出力
+        print(f"[DEBUG] PMID={pmid} AbstractText要素数: {len(abstract_parts)}")
+        if not abstract_parts:
+            # AbstractTextが見つからない場合、Abstract要素の直下を確認
+            abstract_el = article.find(".//Abstract")
+            print(f"[DEBUG] Abstract要素: {ET.tostring(abstract_el, encoding='unicode') if abstract_el is not None else 'None'}")
+
         abstract = " ".join(
             ((el.get("Label", "") + ": ") if el.get("Label") else "") + "".join(el.itertext())
             for el in abstract_parts
