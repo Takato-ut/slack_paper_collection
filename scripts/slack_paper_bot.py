@@ -275,6 +275,7 @@ def add_to_notion(db_id: str, paper: dict, keywords: list[str]) -> None:
 
     abstract = paper.get("abstract", "")
     abstract_chunks = [abstract[i:i+2000] for i in range(0, len(abstract), 2000)] if abstract else []
+    abstract_prop = abstract[:2000] if abstract else ""
 
     pub_date = paper.get("pub_date", "")
 
@@ -296,6 +297,9 @@ def add_to_notion(db_id: str, paper: dict, keywords: list[str]) -> None:
             "Published": {"date": {"start": pub_date}} if pub_date else {"date": None},
             "DOI": {"url": doi_url},
             "PubMed": {"url": pubmed_url},
+            "Abstract": {
+                "rich_text": [{"text": {"content": abstract_prop}}]
+            },
         },
         "children": [
             {
@@ -330,7 +334,7 @@ def add_to_notion(db_id: str, paper: dict, keywords: list[str]) -> None:
 
 def main() -> None:
     posted = load_posted()
-    notion_db_id = get_or_create_notion_db()
+    notion_db_id = "34468fa947ec8172ac5ee77c83190d83"
     keywords = load_keywords()
     watch_papers = load_watch_papers()
     print(f"キーワード: {keywords}")
